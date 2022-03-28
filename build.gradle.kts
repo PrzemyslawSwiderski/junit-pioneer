@@ -4,6 +4,7 @@ plugins {
 	checkstyle
 	`maven-publish`
 	signing
+	`jvm-test-suite`
 	id("com.diffplug.spotless") version "5.14.3"
 	id("at.zierler.yamlvalidator") version "1.5.0"
 	id("org.sonarqube") version "3.3"
@@ -23,23 +24,16 @@ plugins.withType<JavaPlugin>().configureEach {
 group = "org.junit-pioneer"
 description = "JUnit 5 Extension Pack"
 
-val modularBuild : String by project
-val experimentalJavaVersion : String? by project
+val modularBuild: String by project
+val experimentalJavaVersion: String? by project
 val experimentalBuild: Boolean = experimentalJavaVersion?.isNotEmpty() ?: false
 
-val targetJavaVersion = JavaVersion.VERSION_1_8
+val supportedJUnitVersions: String by project
+val targetJavaVersion = JavaVersion.VERSION_11
 
 java {
-	if (experimentalBuild) {
-		toolchain {
-			languageVersion.set(JavaLanguageVersion.of(experimentalJavaVersion!!))
-		}
-	} else {
-		sourceCompatibility = if (modularBuild.toBoolean()) {
-			JavaVersion.VERSION_11
-		} else {
-			targetJavaVersion
-		}
+	toolchain {
+		languageVersion.set(JavaLanguageVersion.of(targetJavaVersion.toString()))
 	}
 	withJavadocJar()
 	withSourcesJar()
@@ -49,23 +43,32 @@ repositories {
 	mavenCentral()
 }
 
-val junitVersion : String by project
+val junitVersion: String by project
+
+val pioneerImplementation: List<Dependency> = listOf(
+		project.dependencies.create(group = "org.junit.jupiter", name = "junit-jupiter-api"),
+		project.dependencies.create(group = "org.junit.jupiter", name = "junit-jupiter-params"),
+		project.dependencies.create(group = "org.junit.platform", name = "junit-platform-commons"),
+		project.dependencies.create(group = "org.junit.platform", name = "junit-platform-launcher"),
+)
+val pioneerTestImplementation: List<Dependency> = listOf(
+		project.dependencies.create(group = "org.junit.jupiter", name = "junit-jupiter-engine"),
+		project.dependencies.create(group = "org.junit.platform", name = "junit-platform-testkit"),
+		project.dependencies.create(group = "org.assertj", name = "assertj-core", version = "3.20.2"),
+		project.dependencies.create(group = "org.mockito", name = "mockito-core", version = "3.12.4"),
+		project.dependencies.create(group = "com.google.jimfs", name = "jimfs", version = "1.2"),
+		project.dependencies.create(group = "nl.jqno.equalsverifier", name = "equalsverifier", version = "3.7.1"),
+)
 
 dependencies {
 	implementation(platform("org.junit:junit-bom:$junitVersion"))
 
-	implementation(group = "org.junit.jupiter", name = "junit-jupiter-api")
-	implementation(group = "org.junit.jupiter", name = "junit-jupiter-params")
-	implementation(group = "org.junit.platform", name = "junit-platform-commons")
-	implementation(group = "org.junit.platform", name = "junit-platform-launcher")
-
-	testImplementation(group = "org.junit.jupiter", name = "junit-jupiter-engine")
-	testImplementation(group = "org.junit.platform", name = "junit-platform-testkit")
-
-	testImplementation(group = "org.assertj", name = "assertj-core", version = "3.20.2")
-	testImplementation(group = "org.mockito", name = "mockito-core", version = "3.12.4")
-	testImplementation(group = "com.google.jimfs", name = "jimfs", version = "1.2")
-	testImplementation(group = "nl.jqno.equalsverifier", name = "equalsverifier", version = "3.7.1")
+	pioneerImplementation.forEach {
+		implementation(it)
+	}
+	pioneerTestImplementation.forEach {
+		testImplementation(it)
+	}
 
 	testRuntimeOnly(group = "org.apache.logging.log4j", name = "log4j-core", version = "2.17.0")
 	testRuntimeOnly(group = "org.apache.logging.log4j", name = "log4j-jul", version = "2.17.0")
@@ -92,10 +95,6 @@ checkstyle {
 yamlValidator {
 	searchPaths = listOf("docs")
 	isSearchRecursive = true
-}
-
-jacoco {
-	toolVersion = "0.8.7"
 }
 
 sonarqube {
@@ -153,12 +152,12 @@ publishing {
 
 				developers {
 					mapOf(
-						"nipafx" to "Nicolai Parlog",
-						"smoyer64" to "Steve Moyer",
-						"Bukama" to "Matthias Bünger",
-						"aepfli" to "Simon Schrottner",
-						"Michael1993" to "Mihály Verhás",
-						"beatngu13" to "Daniel Kraus"
+							"nipafx" to "Nicolai Parlog",
+							"smoyer64" to "Steve Moyer",
+							"Bukama" to "Matthias Bünger",
+							"aepfli" to "Simon Schrottner",
+							"Michael1993" to "Mihály Verhás",
+							"beatngu13" to "Daniel Kraus"
 					).forEach {
 						developer {
 							id.set(it.key)
@@ -188,6 +187,98 @@ nexusPublishing {
 	}
 }
 
+// Our Task to call all our versionTests
+val versionTest by tasks.creating
+
+testing {
+	suites {
+		val test by getting(JvmTestSuite::class) {
+			useJUnitJupiter()
+
+			targets {
+				all {
+					testTask.configure {
+						configure<JacocoTaskExtension> {
+							isEnabled = !experimentalBuild
+						}
+						testLogging {
+							setExceptionFormat("full")
+						}
+						useJUnitPlatform()
+						filter {
+							includeTestsMatching("*Tests")
+						}
+						systemProperty("java.util.logging.manager", "org.apache.logging.log4j.jul.LogManager")
+						// `EnvironmentVariableExtension` uses reflection to change environment variables;
+						// this prevents the corresponding warning (and keeps working on Java 8)
+						// IF YOU ADD MORE OPTIONS; CONSIDER REPLACING `-XX:+IgnoreUnrecognizedVMOptions WITH A CONDITIONAL
+						jvmArgs(
+								"-XX:+IgnoreUnrecognizedVMOptions",
+								"--add-opens=java.base/java.util=ALL-UNNAMED")
+
+					}
+				}
+			}
+		}
+
+		val demoTests by registering(JvmTestSuite::class) {
+			dependencies { implementation(project) }
+
+			sources { java { srcDir("src/demo/java") } }
+			targets {
+				all {
+					testTask.configure {
+						shouldRunAfter(test)
+						filter {
+							includeTestsMatching("*Demo")
+						}
+					}
+				}
+			}
+		}
+
+		supportedJUnitVersions.split(",").filter { it != junitVersion }.forEach {
+			val testSuite = register("testWithJUnit$it", JvmTestSuite::class) {
+				useJUnitJupiter()
+
+				dependencies {
+					implementation(project)
+					pioneerImplementation.forEach { dependency ->
+						implementation(dependency)
+					}
+					pioneerTestImplementation.forEach {dependency ->
+						implementation(dependency)
+					}
+					implementation(project.dependencies.platform("org.junit:junit-bom:$it"))
+				}
+
+				sources {
+					java {
+						srcDir("src/test/java")
+					}
+					resources {
+						srcDir("src/test/resources")
+					}
+				}
+
+				targets {
+					all {
+						testTask.configure {
+							shouldRunAfter(test)
+
+							filter {
+								includeTestsMatching("*Tests")
+							}
+						}
+					}
+				}
+			}
+
+			versionTest.dependsOn(testSuite)
+		}
+	}
+}
+
 tasks {
 
 	sourceSets {
@@ -195,70 +286,13 @@ tasks {
 			if (modularBuild.toBoolean())
 				java.srcDir("src/main/module")
 		}
-		create("demo") {
-			java {
-				srcDir("src/demo/java")
-			}
-			compileClasspath += sourceSets.main.get().output
-			runtimeClasspath += sourceSets.main.get().output
-		}
 	}
-	project(":demo") {
-		sonarqube {
-			isSkipProject = true
-		}
-	}
-	// Adds all dependencies of main to demo sourceSet
-	configurations["demoImplementation"].extendsFrom(configurations.implementation.get())
-	// Ensures JUnit 5 engine is available to demo at runtime
-	configurations["demoRuntimeOnly"].extendsFrom(configurations.testImplementation.get())
 
-	compileJava {
+	// All compile Tasks should now use UTF-8 not just JavaCompile
+	withType<JavaCompile>().configureEach {
 		options.encoding = "UTF-8"
 	}
 
-	compileTestJava {
-		options.encoding = "UTF-8"
-	}
-
-	test {
-		configure<JacocoTaskExtension> {
-			isEnabled = !experimentalBuild
-		}
-		testLogging {
-			setExceptionFormat("full")
-		}
-		useJUnitPlatform()
-		filter {
-			includeTestsMatching("*Tests")
-		}
-		systemProperty("java.util.logging.manager", "org.apache.logging.log4j.jul.LogManager")
-		// `EnvironmentVariableExtension` uses reflection to change environment variables;
-		// this prevents the corresponding warning (and keeps working on Java 8)
-		// IF YOU ADD MORE OPTIONS; CONSIDER REPLACING `-XX:+IgnoreUnrecognizedVMOptions WITH A CONDITIONAL
-		jvmArgs(
-				"-XX:+IgnoreUnrecognizedVMOptions",
-				"--add-opens=java.base/java.util=ALL-UNNAMED")
-	}
-
-	testing {
-		suites {
-			val test by getting(JvmTestSuite::class) {
-				useJUnitJupiter()
-			}
-			val demoTests by registering(JvmTestSuite::class) {
-				dependencies { implementation(project) }
-
-				sources { java { srcDir("src/demo/java") } }
-				targets { all { testTask.configure {
-					shouldRunAfter(test)
-					filter {
-						includeTestsMatching("*Demo")
-					}
-				} } }
-			}
-		}
-	}
 
 	javadoc {
 		javadocTool.set(project.javaToolchains.javadocToolFor {
